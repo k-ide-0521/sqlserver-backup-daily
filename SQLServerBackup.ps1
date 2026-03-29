@@ -12,7 +12,6 @@ $SqlServer  = "localhost"
 $LogDir  = "D:\Logs\SQLBackup"
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $LogFile = Join-Path $LogDir "$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-# ---- パラメータ設定ここまで ----
 
 # 曜日 → ファイル名マッピング
 $DayMap = @{
@@ -24,10 +23,18 @@ $DayMap = @{
     "Friday"    = "Fri"
     "Saturday"  = "Sat"
 }
-
 $DayKey  = (Get-Date).DayOfWeek.ToString()
 $DayFile = $DayMap[$DayKey]
 $DayJP   = (Get-Date -Format "dddd" -Culture "ja-JP")
+
+
+$SmtpServer  = "smtp.example.jp"
+$SmtpPort    = 587
+$MailFrom    = "system-server@example.co.jp"
+$MailTo      = "system-group@example.co.jp"
+$SmtpUser    = "user@example.co.jp"
+$SmtpPass    = $env:SMTP_PASS
+# ---- パラメータ設定ここまで ----
 
 # ログ出力関数
 function Write-Log {
@@ -37,48 +44,95 @@ function Write-Log {
     Write-Host $line
 }
 
-# 処理開始
-Write-Log "===== 処理開始 対象DB数: $($Databases.Count) ====="
-
-foreach ($db in $Databases) {
-
-    $BakPath = "$BackupRoot\bk_$db\$DayFile.bak"
-    $BakName = "完全バックアップ${DayJP}03:00"
-
-    # バックアップ実行SQL
-    $BackupSql = @"
-    BACKUP DATABASE [$db]
-    TO DISK = N'$BakPath'
-    WITH NOFORMAT, INIT, NAME = N'$BakName',
-        SKIP, NOREWIND, NOUNLOAD,
-        STATS = 10, CHECKSUM, STOP_ON_ERROR
-"@
-
-    # 検証SQL
-    $VerifySql = @"
-    DECLARE @backupSetId AS INT
-    SELECT @backupSetId = position
-    FROM msdb..backupset
-    WHERE database_name = N'$db'
-    AND backup_set_id = (
-        SELECT MAX(backup_set_id) FROM msdb..backupset WHERE database_name = N'$db'
+# メール送信関数
+function Send-Mail {
+    param(
+        [string]$Subject,
+        [string]$mailBody
     )
-    IF @backupSetId IS NULL
-        BEGIN RAISERROR(N'確認に失敗しました。データベース ''$db'' のバックアップ情報が見つかりません。', 16, 1) END
-    RESTORE VERIFYONLY FROM DISK = N'$BakPath'
-    WITH FILE = @backupSetId, NOUNLOAD, NOREWIND
-"@
-
     try {
-        Write-Log "[$db] バックアップ開始 Path=$BakPath"
-        Invoke-Sqlcmd -ServerInstance $SqlServer -Query $BackupSql -QueryTimeout 600
-        Write-Log "[$db] バックアップ完了 検証開始"
-        Invoke-Sqlcmd -ServerInstance $SqlServer -Query $VerifySql -QueryTimeout 120
-        Write-Log "[$db] 検証OK"
-    }
-    catch {
-        Write-Log "[$db] [エラー] $($_.Exception.Message)"
+        $MailParams = @{
+            SmtpServer = $SmtpServer
+            Port       = $SmtpPort
+            From       = $MailFrom
+            To         = $MailTo
+            Subject    = $Subject
+            Body       = $mailBody
+            Credential = New-Object System.Management.Automation.PSCredential(
+                             $SmtpUser,
+                             (ConvertTo-SecureString $SmtpPass -AsPlainText -Force)
+                         )
+            UseSsl     = $true
+            Encoding   = [System.Text.Encoding]::UTF8
+        }
+        Send-MailMessage @MailParams
+        Write-Log "メール送信完了 → $MailTo"
+    } catch {
+        Write-Log "[警告] メール送信失敗: $($_.Exception.Message)"
     }
 }
+
+
+
+Write-Log "===== 処理開始 対象DB数: $($Databases.Count) ====="
+
+$failedDatabases = @()
+
+foreach ($db in $Databases) {
+    try {
+        $bakDir  = "$BackupRoot\bk_$db"
+        $bakPath = "$bakDir\$DayFile.bak"
+        $bakName = "完全バックアップ${DayJP}03:00"
+        $query = @"
+BACKUP DATABASE [$db]
+TO DISK = N'$bakPath'
+WITH NOFORMAT, INIT, NAME = N'$bakName',
+    SKIP, NOREWIND, NOUNLOAD,
+    STATS = 10, CHECKSUM, STOP_ON_ERROR
+"@
+        
+        Write-Log "[情報] バックアップ開始: $db"
+
+        New-Item -ItemType Directory -Path $bakDir -Force | Out-Null
+        Invoke-Sqlcmd `
+            -ServerInstance $SqlServer `
+            -Query          $query `
+            -QueryTimeout   3600 `
+            -ErrorAction    Stop
+
+        Write-Log "[成功] バックアップ完了: $db -> $bakPath"
+
+    } catch {
+        $errMsg = $_.Exception.Message
+        Write-Log "[エラー] バックアップ失敗: $db - $errMsg"
+
+        $failedDatabases += [PSCustomObject]@{
+            Database = $db
+            Error    = $errMsg
+        }
+    }
+}
+
+
+if ($failedDatabases.Count -gt 0) {
+    $failureLines = $failedDatabases | ForEach-Object {
+        "  - $($_.Database)`n    エラー: $($_.Error)"
+    }
+    $mailSubject = "[要対応] SQLServerバックアップ失敗 ($($failedDatabases.Count)件) ($(Get-Date -Format 'yyyy/MM/dd HH:mm'))"
+    $mailBody = @"
+SQLServerのバックアップが失敗しました。
+
+サーバー    : $SqlServer
+発生日時    : $(Get-Date -Format 'yyyy/MM/dd HH:mm:ss')
+失敗件数    : $($failedDatabases.Count) 件
+
+【失敗したデータベース】
+$($failureLines -join "`n")
+
+ログファイル: $LogFile
+"@
+    Send-Mail -Subject $mailSubject -mailBody $mailBody
+}
+
 
 Write-Log "===== 処理終了 ====="
