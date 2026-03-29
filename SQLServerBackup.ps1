@@ -73,10 +73,10 @@ function Send-Mail {
 }
 
 
-
+# ---- 処理開始 ----
 Write-Log "===== 処理開始 対象DB数: $($Databases.Count) ====="
 
-$failedDatabases = @()
+$failedDatabases = @() # 処理が失敗したデータベースを保持する配列
 
 foreach ($db in $Databases) {
     try {
@@ -91,7 +91,7 @@ WITH NOFORMAT, INIT, NAME = N'$bakName',
     STATS = 10, CHECKSUM, STOP_ON_ERROR
 "@
         
-        Write-Log "[情報] バックアップ開始: $db"
+        Write-Log "バックアップ開始: $db"
 
         New-Item -ItemType Directory -Path $bakDir -Force | Out-Null
         Invoke-Sqlcmd `
@@ -100,11 +100,11 @@ WITH NOFORMAT, INIT, NAME = N'$bakName',
             -QueryTimeout   3600 `
             -ErrorAction    Stop
 
-        Write-Log "[成功] バックアップ完了: $db -> $bakPath"
+        Write-Log "[処理結果]バックアップ完了: $db -> $bakPath"
 
     } catch {
         $errMsg = $_.Exception.Message
-        Write-Log "[エラー] バックアップ失敗: $db - $errMsg"
+        Write-Log "[処理エラー] バックアップ失敗: $db - $errMsg"
 
         $failedDatabases += [PSCustomObject]@{
             Database = $db
@@ -113,12 +113,12 @@ WITH NOFORMAT, INIT, NAME = N'$bakName',
     }
 }
 
-
+# ---- 処理の失敗通知 ----
 if ($failedDatabases.Count -gt 0) {
     $failureLines = $failedDatabases | ForEach-Object {
         "  - $($_.Database)`n    エラー: $($_.Error)"
     }
-    $mailSubject = "[要対応] SQLServerバックアップ失敗 ($($failedDatabases.Count)件) ($(Get-Date -Format 'yyyy/MM/dd HH:mm'))"
+    $mailSubject = "[処理エラー] SQLServerバックアップ失敗 ($($failedDatabases.Count)件) ($(Get-Date -Format 'yyyy/MM/dd HH:mm'))"
     $mailBody = @"
 SQLServerのバックアップが失敗しました。
 
