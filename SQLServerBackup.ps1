@@ -67,9 +67,10 @@ function Send-Mail {
     }
 }
 
-# =============================================
+# ---- 処理開始 ----
+# ===================================
 # フェーズ1: バックアップ
-# =============================================
+# ===================================
 Write-Log "===== バックアップ開始 対象DB数: $($Databases.Count) ====="
 
 $backupFailed     = @()   # バックアップ失敗リスト
@@ -87,22 +88,23 @@ WITH NOFORMAT, INIT, NAME = N'$bakName',
     SKIP, NOREWIND, NOUNLOAD,
     STATS = 10, CHECKSUM, STOP_ON_ERROR
 "@
-        Write-Log "[情報] バックアップ開始: $db"
+        Write-Log "バックアップ開始: $db"
         New-Item -ItemType Directory -Path $bakDir -Force | Out-Null
         Invoke-Sqlcmd -ServerInstance $SqlServer -Query $query -QueryTimeout 3600 -ErrorAction Stop
-        Write-Log "[成功] バックアップ完了: $db -> $bakPath"
+        Write-Log "バックアップ完了: $db -> $bakPath"
 
     } catch {
         $errMsg = $_.Exception.Message
         Write-Log "[エラー] バックアップ失敗: $db - $errMsg"
-        $backupFailed      += [PSCustomObject]@{ Database = $db; Error = $errMsg }
+        $backupFailed      += [PSCustomObject]@{ Database = $db; Error = $errMsg; Path = $bakPath }
         $backupFailedNames += $db
     }
 }
 
-# =============================================
+
+# ===================================
 # フェーズ2: 整合性検証（バックアップ成功分のみ）
-# =============================================
+# ===================================
 Write-Log "===== 整合性検証開始 ====="
 
 $verifyFailed = @()
@@ -136,9 +138,9 @@ RESTORE VERIFYONLY
 FROM  DISK = N'$bakPath'
 WITH  FILE = @backupSetId, NOUNLOAD, NOREWIND
 "@
-        Write-Log "[情報] 整合性検証開始: $db"
+        Write-Log "整合性検証開始: $db"
         Invoke-Sqlcmd -ServerInstance $SqlServer -Query $verifyQuery -QueryTimeout 3600 -ErrorAction Stop
-        Write-Log "[成功] 整合性検証完了: $db"
+        Write-Log "整合性検証完了: $db"
 
     } catch {
         $errMsg = $_.Exception.Message
@@ -147,13 +149,13 @@ WITH  FILE = @backupSetId, NOUNLOAD, NOREWIND
     }
 }
 
-# =============================================
-# フェーズ3: まとめて通知
-# =============================================
+# ===================================
+# フェーズ3: 通知
+# ===================================
 
 # バックアップ失敗通知
 if ($backupFailed.Count -gt 0) {
-    $failureLines = $backupFailed | ForEach-Object { "  - $($_.Database)`n    エラー: $($_.Error)" }
+    $failureLines = $backupFailed | ForEach-Object { "  - $($_.Database)`n  バックアップ先: $($_.Path)`n  エラー: $($_.Error)" }
     $subject = "[要対応] SQLServerバックアップ失敗 ($($backupFailed.Count)件) ($(Get-Date -Format 'yyyy/MM/dd HH:mm'))"
     $body = @"
 SQLServerのバックアップが失敗しました。
